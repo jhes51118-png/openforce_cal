@@ -1,0 +1,977 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>數據角度位移轉換器 (BB產生器)</title>
+    
+    <!-- 引入 Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- 引入 React 和 ReactDOM -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    
+    <!-- 引入 Babel 用於解析 JSX -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    
+    <!-- 引入 SheetJS 用於 Excel 處理 -->
+    <script src="https://cdn.sheetjs.com/xlsx-0.20.1/package/dist/xlsx.full.min.js"></script>
+    
+    <!-- 引入 Chart.js 用於繪圖 -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    
+    <!-- 引入 Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+
+    <style>
+        body { font-family: 'Noto Sans TC', sans-serif; background-color: #f3f4f6; }
+        .drag-active { border-color: #3b82f6; background-color: #eff6ff; }
+        
+        /* 強制圖表容器高度一致 */
+        .fixed-chart-height { position: relative; height: 320px; width: 100%; }
+        
+        /* 表格樣式 */
+        .table-container { max-height: 600px; overflow-y: auto; }
+        /* Sticky Header 需要涵蓋多層 */
+        thead { position: sticky; top: 0; z-index: 20; }
+        
+        /* 報表表格分隔線 */
+        .border-right-bold { border-right: 2px solid #9ca3af; } /* 加深分隔線顏色 */
+        .excel-cell { border-right: 1px solid #d1d5db; border-bottom: 1px solid #d1d5db; }
+        
+        /* 模擬 Excel 黃色輸入區 */
+        .bg-excel-yellow { background-color: #ffffcc; }
+        .bg-excel-header { background-color: #f3f4f6; }
+        
+        /* 統計卡片樣式 */
+        .stat-card { transition: all 0.2s; }
+        .stat-card:hover { transform: translateY(-2px); box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1); }
+        
+        /* 圖表控制項樣式 */
+        .chart-controls input { transition: all 0.2s; }
+        .chart-controls input:focus { border-color: #3b82f6; outline: none; background-color: #fff; }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef, useMemo } = React;
+
+        // 圖示組件
+        const IconUpload = () => <i data-lucide="upload-cloud" className="w-8 h-8 mb-2 text-gray-400"></i>;
+        const IconFile = () => <i data-lucide="file-spreadsheet" className="w-5 h-5 mr-2"></i>;
+        const IconDownload = () => <i data-lucide="download" className="w-4 h-4 mr-2"></i>;
+        const IconGrid = () => <i data-lucide="layout-grid" className="w-4 h-4 mr-2"></i>;
+        const IconActivity = () => <i data-lucide="activity" className="w-4 h-4 mr-2"></i>;
+        const IconTable = () => <i data-lucide="table" className="w-4 h-4 mr-2"></i>;
+        const IconSettings = () => <i data-lucide="settings" className="w-4 h-4 mr-2"></i>;
+        const IconCompass = () => <i data-lucide="compass" className="w-4 h-4 mr-2"></i>;
+        const IconCalculator = () => <i data-lucide="calculator" className="w-4 h-4 mr-2"></i>;
+        
+        // 獨立的單一圖表元件 (新增 onRangeChange 參數)
+        const SingleChart = ({ title, datasets, xMax, xMin, yLabel = "荷重 (Force)", onRangeChange }) => {
+            const canvasRef = useRef(null);
+            const chartInstance = useRef(null);
+
+            useEffect(() => {
+                if (!canvasRef.current || !datasets) return;
+
+                if (chartInstance.current) {
+                    chartInstance.current.destroy();
+                }
+
+                if (datasets.length === 0) return;
+
+                const ctx = canvasRef.current.getContext('2d');
+                chartInstance.current = new Chart(ctx, {
+                    type: 'scatter',
+                    data: { datasets },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        animation: false,
+                        plugins: {
+                            legend: { 
+                                display: true,
+                                position: 'top',
+                                labels: { boxWidth: 10, font: { size: 10 } }
+                            }, 
+                            title: { display: true, text: title, font: { size: 16, weight: 'bold' } },
+                            tooltip: {
+                                callbacks: {
+                                    label: (ctx) => `${ctx.dataset.label}: (${ctx.parsed.x.toFixed(2)}, ${ctx.parsed.y.toFixed(2)})`
+                                }
+                            }
+                        },
+                        scales: {
+                            x: {
+                                title: { display: true, text: '角度 (Angle)' },
+                                grid: { color: '#f3f4f6' },
+                                max: xMax !== undefined && xMax !== '' ? parseFloat(xMax) : undefined,
+                                min: xMin !== undefined && xMin !== '' ? parseFloat(xMin) : undefined
+                            },
+                            y: {
+                                title: { display: true, text: yLabel },
+                                grid: { color: '#f3f4f6' }
+                            }
+                        }
+                    }
+                });
+
+                return () => {
+                    if (chartInstance.current) chartInstance.current.destroy();
+                };
+            }, [datasets, title, xMax, xMin]);
+
+            return (
+                <div className="bg-white p-4 rounded-xl shadow-md border border-gray-200 flex flex-col h-full relative group">
+                    {/* 直接在圖表上方顯示控制項 */}
+                    <div className="absolute top-3 right-3 z-10 chart-controls flex items-center gap-1 opacity-60 hover:opacity-100 transition-opacity bg-white/80 p-1 rounded">
+                        <span className="text-[10px] text-gray-500 font-bold uppercase tracking-wider mr-1">X-Range</span>
+                        <input 
+                            type="number" 
+                            className="w-14 text-xs border border-gray-300 rounded px-1 py-0.5 text-center bg-gray-50/50"
+                            placeholder="Min"
+                            value={xMin} 
+                            onChange={(e) => onRangeChange('min', e.target.value)}
+                        />
+                        <span className="text-gray-400 text-xs">~</span>
+                        <input 
+                            type="number" 
+                            className="w-14 text-xs border border-gray-300 rounded px-1 py-0.5 text-center bg-gray-50/50"
+                            placeholder="Max"
+                            value={xMax}
+                            onChange={(e) => onRangeChange('max', e.target.value)}
+                        />
+                    </div>
+
+                    <div className="fixed-chart-height flex-grow">
+                        {datasets && datasets.length > 0 ? (
+                            <canvas ref={canvasRef}></canvas>
+                        ) : (
+                            <div className="w-full h-full flex items-center justify-center text-gray-400 bg-gray-50 rounded">
+                                無符合數據 (僅顯示 Curve 5 & 6)
+                            </div>
+                        )}
+                    </div>
+                </div>
+            );
+        };
+
+        function App() {
+            const [baseAngle, setBaseAngle] = useState(5.0);
+            
+            // 抗加速度參數：輸入暫存值
+            const [inputLcdWeight, setInputLcdWeight] = useState("");
+            const [inputAxisToTop, setInputAxisToTop] = useState("");
+            const [inputCgToAxis, setInputCgToAxis] = useState("");
+
+            // 抗加速度參數：實際計算值 (點擊計算後更新)
+            const [calcParams, setCalcParams] = useState({
+                lcdWeight: "",
+                axisToTop: "",
+                cgToAxis: ""
+            });
+
+            // 圖表 X 軸範圍設定 (預設值)
+            const [chartRanges, setChartRanges] = useState({
+                overview: { min: '', max: '' },
+                clamping: { min: 0, max: 10 },
+                opening: { min: 0, max: 30 },
+                closing: { min: 0, max: 30 }
+            });
+
+            const [rawData, setRawData] = useState([]); 
+            const [headers, setHeaders] = useState([]);
+            const [fileName, setFileName] = useState("");
+            const [isDragging, setIsDragging] = useState(false);
+            const [processedData, setProcessedData] = useState([]);
+            
+            // 圖表數據
+            const [chartData, setChartData] = useState({
+                overview: [],
+                clamping: [],
+                opening30: [],
+                closing30: []
+            });
+
+            // 報表數據
+            const [reportTable, setReportTable] = useState({ plotNames: [], headers: [], rows: [], stats: [] });
+
+            // 初始化 Lucide icons
+            useEffect(() => {
+                if (window.lucide) window.lucide.createIcons();
+            });
+
+            // 處理圖表範圍變更
+            const handleRangeChange = (chartKey, type, value) => {
+                setChartRanges(prev => ({
+                    ...prev,
+                    [chartKey]: {
+                        ...prev[chartKey],
+                        [type]: value
+                    }
+                }));
+            };
+
+            // 觸發計算
+            const handleCalculate = () => {
+                setCalcParams({
+                    lcdWeight: inputLcdWeight,
+                    axisToTop: inputAxisToTop,
+                    cgToAxis: inputCgToAxis
+                });
+            };
+
+            // 處理檔案上傳
+            const handleFileUpload = (file) => {
+                const reader = new FileReader();
+                reader.onload = (e) => {
+                    const data = new Uint8Array(e.target.result);
+                    const workbook = XLSX.read(data, { type: 'array' });
+                    const firstSheetName = workbook.SheetNames[0];
+                    const worksheet = workbook.Sheets[firstSheetName];
+                    // 讀取所有資料
+                    const jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1 });
+                    
+                    if (jsonData.length > 0) {
+                        setHeaders(jsonData[0]); // 第一列為標題
+                        setRawData(jsonData.slice(1)); // 第二列開始為數據
+                        setFileName(file.name);
+
+                        // --- 修正邏輯：自動抓取 I2 (Row 2, Col I) ---
+                        // Row 2 在 jsonData 的 index 為 1
+                        // Column I 在 Excel 是第 9 欄，index 為 8
+                        if (jsonData.length > 1) {
+                            const valI2 = jsonData[1][8];
+                            const parsedI2 = parseFloat(valI2);
+                            if (!isNaN(parsedI2)) {
+                                setBaseAngle(parsedI2);
+                            }
+                        }
+                    }
+                };
+                reader.readAsArrayBuffer(file);
+            };
+
+            const onDragOver = (e) => { e.preventDefault(); setIsDragging(true); };
+            const onDragLeave = () => { setIsDragging(false); };
+            const onDrop = (e) => {
+                e.preventDefault();
+                setIsDragging(false);
+                if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+                    handleFileUpload(e.dataTransfer.files[0]);
+                }
+            };
+            const onFileSelect = (e) => {
+                if (e.target.files && e.target.files.length > 0) {
+                    handleFileUpload(e.target.files[0]);
+                }
+            };
+
+            // 1. 計算數據位移
+            useEffect(() => {
+                if (rawData.length === 0 || headers.length === 0) return;
+
+                const angleIndices = headers.map((h, i) => {
+                    if (typeof h === 'string' && (h.toLowerCase().includes('angle') || h.includes('角度'))) {
+                        return i;
+                    }
+                    return -1;
+                }).filter(i => i !== -1);
+
+                const newBody = rawData.map(row => {
+                    const newRow = [...row];
+                    angleIndices.forEach(idx => {
+                        const val = parseFloat(newRow[idx]);
+                        if (!isNaN(val)) {
+                            newRow[idx] = Number((val - parseFloat(baseAngle)).toFixed(4));
+                        }
+                    });
+                    return newRow;
+                });
+
+                setProcessedData(newBody);
+            }, [rawData, headers, baseAngle]);
+
+            // 2. 數據分類、圖表生成 與 報表生成
+            useEffect(() => {
+                if (processedData.length === 0 || headers.length === 0) return;
+
+                const colors = ['#3b82f6', '#ef4444', '#10b981', '#f59e0b', '#8b5cf6', '#ec4899'];
+                
+                const overviewSets = [];
+                const clampingSets = [];
+                const opening30Sets = [];
+                const closing30Sets = [];
+
+                const reportColumns = []; 
+                const plotNames = []; 
+                const statsList = []; 
+                let maxRows = 0;
+
+                let pairCount = 0;
+
+                // 輔助函式：尋找最接近特定角度的 Force
+                const findForceAtAngle = (dataPoints, targetAngle) => {
+                    if (!dataPoints || dataPoints.length === 0) return "-";
+                    let closest = null;
+                    let minDiff = Infinity;
+                    
+                    for (const p of dataPoints) {
+                        const diff = Math.abs(p.x - targetAngle);
+                        if (diff < minDiff) {
+                            minDiff = diff;
+                            closest = p.y;
+                        }
+                    }
+                    if (minDiff > 2.0) return "-";
+                    return closest; // Return number for calculation
+                };
+
+                // 輔助函式：尋找最接近角度的完整 Point (用於對齊報表)
+                const findPointAtAngle = (dataPoints, targetAngle) => {
+                    if (!dataPoints || dataPoints.length === 0) return null;
+                    let closest = null;
+                    let minDiff = Infinity;
+                    
+                    for (const p of dataPoints) {
+                        const diff = Math.abs(p.x - targetAngle);
+                        if (diff < minDiff) {
+                            minDiff = diff;
+                            closest = p;
+                        }
+                    }
+                    // 容許較大的誤差以確保填值，例如 0.5 度內
+                    if (minDiff > 0.5) return null; 
+                    return closest; 
+                };
+
+                for (let i = 0; i < headers.length; i++) {
+                    const h = String(headers[i]).toLowerCase();
+                    if ((h.includes('angle') || h.includes('角度')) && i + 1 < headers.length) {
+                        const label = `Curve ${pairCount + 1}`;
+                        const color = colors[pairCount % colors.length];
+                        const forceHeaderName = headers[i+1];
+                        
+                        const points = [];
+                        for(let r=0; r<processedData.length; r++) {
+                            const x = processedData[r][i];
+                            const y = processedData[r][i+1];
+                            if (typeof x === 'number' && typeof y === 'number') {
+                                points.push({x, y});
+                            }
+                        }
+
+                        if (points.length > 1) {
+                            let maxAngleIdx = 0;
+                            let maxAngleVal = -9999;
+                            points.forEach((p, idx) => {
+                                if (p.x > maxAngleVal) {
+                                    maxAngleVal = p.x;
+                                    maxAngleIdx = idx;
+                                }
+                            });
+
+                            const goData = points.slice(0, maxAngleIdx + 1);
+                            const returnData = points.slice(maxAngleIdx + 1);
+
+                            // --- Stats Calculation ---
+
+                            // 1. 開啟力最大值
+                            const openingRange = goData.filter(p => p.x >= 0 && p.x <= 30);
+                            let maxOpenForce = -Infinity;
+                            let maxOpenAngle = 0;
+                            if (openingRange.length > 0) {
+                                openingRange.forEach(p => {
+                                    if (p.y > maxOpenForce) {
+                                        maxOpenForce = p.y;
+                                        maxOpenAngle = p.x;
+                                    }
+                                });
+                            } else {
+                                maxOpenForce = null;
+                                maxOpenAngle = null;
+                            }
+
+                            // 2. LCD 夾持力 (去程 0~10度) - Updated Logic
+                            const clampingRangeGo = goData.filter(p => p.x >= 0 && p.x <= 10);
+                            let maxClampForce = null;
+                            const foundPeaks = [];
+
+                            if (clampingRangeGo.length > 2) {
+                                for (let k = 1; k < clampingRangeGo.length - 1; k++) {
+                                    const prev = clampingRangeGo[k-1].y;
+                                    const curr = clampingRangeGo[k].y;
+                                    const next = clampingRangeGo[k+1].y;
+                                    
+                                    // 寬鬆的峰值檢測 (Local Peak)
+                                    if (curr > prev && curr > next) {
+                                        foundPeaks.push({ x: clampingRangeGo[k].x, y: curr });
+                                    }
+                                }
+                            }
+                            
+                            const validPeaks = foundPeaks.filter(p => p.y > 30);
+                            
+                            if (validPeaks.length > 0) {
+                                // 取第一個 (角度最小的) 顯著峰值
+                                maxClampForce = validPeaks[0].y;
+                            } 
+                            // 若無峰值，maxClampForce 保持為 null，不使用 fallback
+
+                            // 3. LCD 開 90˚度數值 (g) - 開啟去程
+                            let forceAt90 = findForceAtAngle(goData, 90);
+                            if (forceAt90 === "-") forceAt90 = null;
+
+                            // 4. 闔蓋曲線大於 0g 時角度
+                            let zeroCrossAngle = null;
+                            let wasNegative = false;
+                            
+                            // 掃描數據
+                            if (returnData.length > 0) {
+                                // 判斷是否曾經小於等於0
+                                if (returnData.some(p => p.y <= 0)) wasNegative = true;
+                                
+                                if (wasNegative) {
+                                    // 尋找由負轉正
+                                    for (let k = 1; k < returnData.length; k++) {
+                                        const prevY = returnData[k-1].y;
+                                        const currY = returnData[k].y;
+                                        if (prevY <= 0 && currY > 0) {
+                                            zeroCrossAngle = returnData[k].x;
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+
+                            // 5. LCD 開 130˚度數值 & 抗加速度計算
+                            let forceAt130 = findForceAtAngle(goData, 130);
+                            let antiAcceleration = "-";
+
+                            // 使用 calcParams 而非直接 input state
+                            if (forceAt130 !== "-" && calcParams.lcdWeight && calcParams.axisToTop && calcParams.cgToAxis) {
+                                const w = parseFloat(calcParams.lcdWeight);
+                                const att = parseFloat(calcParams.axisToTop);
+                                const cga = parseFloat(calcParams.cgToAxis);
+                                const f130 = parseFloat(forceAt130);
+
+                                if (!isNaN(w) && !isNaN(att) && !isNaN(cga) && !isNaN(f130)) {
+                                    const rad50 = 50 * Math.PI / 180;
+                                    const numerator = (f130 / 1000) * (att / 10) * 9.81;
+                                    const denominator = (w / 1000) * (cga / 10) * Math.cos(rad50);
+                                    
+                                    if (denominator !== 0) {
+                                        antiAcceleration = (numerator / denominator).toFixed(4);
+                                    }
+                                }
+                            }
+
+                            // ----------------------------------------------------------------
+                            // 篩選邏輯
+                            // ----------------------------------------------------------------
+                            if (pairCount === 4 || pairCount === 5) {
+                                
+                                if (pairCount === 4) {
+                                    plotNames.push(forceHeaderName || label);
+
+                                    // 計算指定角度荷重
+                                    const targetAngles = [20, 30, 45, 60, 80, 90, 120, 130, 135, 140];
+                                    const angleSteps = targetAngles.map(a => {
+                                        const valGo = findForceAtAngle(goData, a);
+                                        const valRet = findForceAtAngle(returnData, a);
+                                        return {
+                                            angle: a,
+                                            goForce: typeof valGo === 'number' ? valGo.toFixed(2) : valGo,
+                                            retForce: typeof valRet === 'number' ? valRet.toFixed(2) : valRet
+                                        };
+                                    });
+
+                                    statsList.push({
+                                        name: `Curve ${pairCount + 1}`, 
+                                        maxOpenForce: maxOpenForce !== null ? maxOpenForce.toFixed(3) : "-",
+                                        maxOpenAngle: maxOpenAngle !== null ? maxOpenAngle.toFixed(2) : "-",
+                                        maxClampForce: maxClampForce !== null ? maxClampForce.toFixed(3) : "-", 
+                                        forceAt90: forceAt90 !== null ? forceAt90.toFixed(3) : "-",
+                                        zeroCrossAngle: zeroCrossAngle !== null ? zeroCrossAngle.toFixed(2) : "-",
+                                        // 新增欄位
+                                        forceAt130: forceAt130 !== "-" ? forceAt130.toFixed(3) : "-",
+                                        antiAcceleration: antiAcceleration,
+                                        
+                                        angleSteps: angleSteps 
+                                    });
+
+                                    reportColumns.push({
+                                        name: `Plot ${pairCount}`,
+                                        go: goData,
+                                        ret: returnData
+                                    });
+                                    
+                                    maxRows = Math.max(maxRows, goData.length);
+                                }
+
+                                const step = points.length > 5000 ? 5 : 1;
+                                const chartPoints = points.filter((_, idx) => idx % step === 0);
+                                
+                                overviewSets.push({
+                                    label: `${label}`,
+                                    data: chartPoints,
+                                    borderColor: color,
+                                    backgroundColor: color,
+                                    borderWidth: 1.5,
+                                    pointRadius: 0.5,
+                                    showLine: true
+                                });
+
+                                if (goData.length > 0) {
+                                    const goFiltered = goData.filter((p, idx) => idx % step === 0);
+                                    const clampFiltered = goData.filter((p, idx) => idx % step === 0);
+
+                                    if (goFiltered.length > 0) {
+                                        opening30Sets.push({
+                                            label: `${label} (去)`,
+                                            data: goFiltered,
+                                            borderColor: color,
+                                            backgroundColor: color,
+                                            borderWidth: 2,
+                                            pointRadius: 1,
+                                            showLine: true
+                                        });
+                                    }
+                                    
+                                    if (clampFiltered.length > 0) {
+                                        clampingSets.push({
+                                            label: `${label} (去 0-10°)`,
+                                            data: clampFiltered,
+                                            borderColor: color,
+                                            backgroundColor: color,
+                                            borderWidth: 2,
+                                            pointRadius: 2,
+                                            showLine: true
+                                        });
+                                    }
+                                }
+                                
+                                if (returnData.length > 0) {
+                                    const retFiltered = returnData.filter((p, idx) => idx % step === 0);
+                                    if (retFiltered.length > 0) {
+                                        closing30Sets.push({
+                                            label: `${label} (回)`,
+                                            data: retFiltered,
+                                            borderColor: color,
+                                            backgroundColor: color,
+                                            borderWidth: 2,
+                                            pointRadius: 1,
+                                            showLine: true
+                                        });
+                                    }
+                                }
+                            } 
+                        }
+                        pairCount++;
+                    }
+                }
+
+                // --- Build Report Rows (Aligned by Go Angle) ---
+                const reportRows = [];
+                // 這裡假設只有一個 Report Column Set (Curve 5)，如果有這邏輯會以第一個為主
+                if (reportColumns.length > 0) {
+                    const col = reportColumns[0]; // 目前僅處理 Curve 5 的表格顯示
+                    for (let r = 0; r < col.go.length; r++) {
+                        const rowData = [];
+                        
+                        // 1. 去程數據
+                        const goP = col.go[r];
+                        rowData.push(goP.x.toFixed(2));
+                        rowData.push(goP.y.toFixed(3));
+                        
+                        // 2. 回程數據 (使用角度對齊 Interpolation/Find)
+                        // 找尋回程數據中，角度最接近 goP.x 的點
+                        const retP = findPointAtAngle(col.ret, goP.x);
+                        
+                        if (retP) {
+                            rowData.push(retP.x.toFixed(2));
+                            rowData.push(retP.y.toFixed(3));
+                        } else {
+                            // 若找不到對應角度 (例如超出回程範圍)，填空
+                            rowData.push("");
+                            rowData.push("");
+                        }
+                        
+                        reportRows.push(rowData);
+                    }
+                }
+                
+                const reportHeaderNames = [];
+                reportColumns.forEach((col, idx) => {
+                    reportHeaderNames.push(`角度(去)`);
+                    reportHeaderNames.push(`荷重`);
+                    reportHeaderNames.push(`角度(回)`);
+                    reportHeaderNames.push(`荷重`);
+                });
+
+                setReportTable({
+                    plotNames: plotNames,
+                    headers: reportHeaderNames,
+                    rows: reportRows,
+                    rawColumns: reportColumns,
+                    stats: statsList
+                });
+
+                setChartData({
+                    overview: overviewSets,
+                    clamping: clampingSets,
+                    opening30: opening30Sets,
+                    closing30: closing30Sets
+                });
+
+            }, [processedData, headers, baseAngle, calcParams]); // Updated dependencies
+
+            // 匯出 Excel
+            const handleExport = () => {
+                if (processedData.length === 0) return;
+                const wb = XLSX.utils.book_new();
+
+                // 1. 原始數據 Sheet
+                const exportData1 = [headers, ...processedData];
+                const ws1 = XLSX.utils.aoa_to_sheet(exportData1);
+                XLSX.utils.book_append_sheet(wb, ws1, "Raw_Converted");
+
+                // 2. 數值計算機報表 Sheet
+                if (reportTable.headers.length > 0) {
+                    const exportData2 = [reportTable.headers, ...reportTable.rows];
+                    const ws2 = XLSX.utils.aoa_to_sheet(exportData2);
+                    XLSX.utils.book_append_sheet(wb, ws2, "數值計算機報表");
+                }
+
+                // 3. 新增：分析結果 (Stats) Sheet
+                if (reportTable.stats.length > 0) {
+                    const statsHeader = ["Curve Name", "開啟力最大值 (g)", "開啟角度 (deg)", "LCD 夾持力 (g)", "LCD 開 90˚數值 (g)", "闔蓋曲線 > 0g 角度", "LCD 開 130˚ (g)", "LCD 開 130˚ 抗加速度"];
+                    const statsRows = reportTable.stats.map(s => [
+                        s.name, 
+                        parseFloat(s.maxOpenForce) || 0, 
+                        parseFloat(s.maxOpenAngle) || 0,
+                        parseFloat(s.maxClampForce) || 0,
+                        parseFloat(s.forceAt90) || 0,
+                        parseFloat(s.zeroCrossAngle) || 0,
+                        parseFloat(s.forceAt130) || 0,
+                        parseFloat(s.antiAcceleration) || "N/A"
+                    ]);
+                    
+                    const exportData3 = [statsHeader, ...statsRows];
+                    const ws3 = XLSX.utils.aoa_to_sheet(exportData3);
+                    XLSX.utils.book_append_sheet(wb, ws3, "分析結果 (Stats)");
+                }
+
+                const newFileName = fileName.replace(/(\.[\w\d_-]+)$/i, '_BB$1');
+                XLSX.writeFile(wb, newFileName || "output_BB.xlsx");
+            };
+
+            return (
+                <div className="min-h-screen p-4 md:p-6 max-w-[1600px] mx-auto pb-20">
+                    
+                    {/* Header */}
+                    <header className="mb-6 border-b pb-4 flex justify-between items-end">
+                        <div>
+                            <h1 className="text-2xl font-bold text-gray-800 flex items-center gap-2">
+                                <IconFile />
+                                Open Force
+                            </h1>
+                            <p className="text-gray-500 text-sm mt-1">
+                                自動生成 BB 檔、LCD 夾持力分析、0-30度區間圖表
+                            </p>
+                        </div>
+                        {/* 移除 Header 上的輸入框 */}
+                        <div className="flex gap-4">
+                        </div>
+                    </header>
+
+                    {/* 主要內容 Flex 佈局 (0.5 : 1.2 : 4) */}
+                    <div className="flex flex-col md:flex-row gap-6">
+                        
+                        {/* 1. 左側 (0.5等份): 輸入與設定 */}
+                        <div className="w-full md:flex-[0.5] space-y-4 min-w-[200px]">
+                            
+                            {/* 上傳區 */}
+                            <div 
+                                className={`border-2 border-dashed rounded-xl p-6 text-center transition-colors cursor-pointer relative ${isDragging ? 'drag-active border-blue-500' : 'border-gray-300 hover:border-blue-400 bg-white'}`}
+                                onDragOver={onDragOver}
+                                onDragLeave={onDragLeave}
+                                onDrop={onDrop}
+                                onClick={() => document.getElementById('fileInput').click()}
+                            >
+                                <input type="file" id="fileInput" className="hidden" accept=".csv,.xlsx,.xls" onChange={onFileSelect} />
+                                <div className="flex flex-col items-center justify-center pointer-events-none">
+                                    <IconUpload />
+                                    <p className="text-sm text-gray-600 font-medium truncate w-full">
+                                        {fileName ? fileName : "拖曳檔案至此"}
+                                    </p>
+                                </div>
+                            </div>
+
+                            {/* 抗加速度參數設定 (含計算按鈕) */}
+                            <div className="bg-white p-4 rounded-xl shadow-sm border border-gray-200">
+                                <h4 className="font-bold text-gray-700 mb-3 flex items-center">
+                                    <IconSettings /> 抗加速度參數設定
+                                </h4>
+                                <div className="space-y-2 text-sm">
+                                    <div>
+                                        <label className="block text-gray-500 mb-1">LCD 重量 (g)</label>
+                                        <input 
+                                            type="number" 
+                                            value={inputLcdWeight}
+                                            onChange={(e) => setInputLcdWeight(e.target.value)}
+                                            className="w-full border border-gray-300 rounded px-2 py-1"
+                                            placeholder="輸入重量..."
+                                        />
+                                    </div>
+                                    <div>
+                                        <label className="block text-gray-500 mb-1">軸心 to 天側 (mm)</label>
+                                        <input 
+                                            type="number" 
+                                            value={inputAxisToTop}
+                                            onChange={(e) => setInputAxisToTop(e.target.value)}
+                                            className="w-full border border-gray-300 rounded px-2 py-1"
+                                            placeholder="輸入距離..."
+                                        />
+                                    </div>
+                                    <div>
+                                        <label className="block text-gray-500 mb-1">LCD重心 to 軸心 (mm)</label>
+                                        <input 
+                                            type="number" 
+                                            value={inputCgToAxis}
+                                            onChange={(e) => setInputCgToAxis(e.target.value)}
+                                            className="w-full border border-gray-300 rounded px-2 py-1"
+                                            placeholder="輸入距離..."
+                                        />
+                                    </div>
+                                    <button 
+                                        onClick={handleCalculate}
+                                        className="w-full mt-3 bg-indigo-600 hover:bg-indigo-700 text-white py-1.5 rounded flex items-center justify-center gap-2 transition-colors"
+                                    >
+                                        <IconCalculator className="w-4 h-4" /> 計算
+                                    </button>
+                                </div>
+                            </div>
+
+                            {/* 基準角度設定 - 移動到此處 */}
+                            <div className="bg-white px-4 py-3 rounded-xl border border-gray-200 shadow-sm flex items-center justify-between">
+                                <div className="flex items-center gap-2">
+                                    <IconCompass className="text-gray-600" />
+                                    <label className="text-sm font-bold text-gray-700">基準角度:</label>
+                                </div>
+                                <div className="flex items-center gap-2">
+                                    <input 
+                                        type="number" 
+                                        step="0.1"
+                                        value={baseAngle}
+                                        onChange={(e) => setBaseAngle(e.target.value)}
+                                        className="w-20 border border-gray-300 rounded-md shadow-sm p-1 text-center font-mono bg-gray-50 focus:bg-white focus:ring-2 focus:ring-blue-200 outline-none transition-all"
+                                    />
+                                    <span className="text-gray-500 text-sm">度</span>
+                                </div>
+                            </div>
+
+                            <button 
+                                onClick={handleExport}
+                                disabled={processedData.length === 0}
+                                className={`w-full flex items-center justify-center py-2 px-4 rounded-lg font-medium text-white transition-colors shadow-sm
+                                    ${processedData.length > 0 ? 'bg-blue-600 hover:bg-blue-700' : 'bg-gray-300 cursor-not-allowed'}
+                                `}
+                            >
+                                <IconDownload />
+                                下載 xlsx 檔
+                            </button>
+                        </div>
+
+                        {/* 2. 中間 (1.2等份): 分析結果 (移除 Scrollbar) */}
+                        <div className="w-full md:flex-[1.2] space-y-4 min-w-[250px]">
+                            {/* 分析結果顯示區 */}
+                            {reportTable.stats.length > 0 && (
+                                <div className="bg-white rounded-xl shadow-sm border border-orange-200 overflow-hidden">
+                                    <div className="bg-orange-50 px-4 py-3 border-b border-orange-100 flex items-center">
+                                        <IconActivity className="w-5 h-5 text-orange-600 mr-2" />
+                                        <h3 className="font-bold text-orange-800">分析結果</h3>
+                                    </div>
+                                    <div className="p-3 space-y-3">
+                                        {reportTable.stats.map((stat, idx) => (
+                                            <div key={idx} className="stat-card bg-white border border-gray-100 rounded-lg p-3 shadow-sm relative">
+                                                {/* 核心數據 */}
+                                                <div className="space-y-2 mb-3 mt-2">
+                                                    <div className="flex justify-between items-center text-[15px]">
+                                                        <span className="text-gray-600">開啟力最大值</span>
+                                                        <span className="font-bold text-gray-800 font-mono">{stat.maxOpenForce}</span>
+                                                    </div>
+                                                    <div className="flex justify-between items-center text-[15px]">
+                                                        <span className="text-gray-600">開啟角度</span>
+                                                        <span className="font-bold text-gray-800 font-mono">{stat.maxOpenAngle}°</span>
+                                                    </div>
+                                                    <div className="flex justify-between items-center text-[15px]">
+                                                        <span className="text-gray-600">LCD 夾持力</span>
+                                                        <span className="font-bold text-purple-700 font-mono">{stat.maxClampForce}</span>
+                                                    </div>
+                                                    <div className="flex justify-between items-center text-[15px]">
+                                                        <span className="text-gray-600">LCD 開 90˚數值 (g)</span>
+                                                        <span className="font-bold text-blue-700 font-mono">{stat.forceAt90}</span>
+                                                    </div>
+                                                    <div className="flex justify-between items-center pt-1 border-t border-gray-50 text-[15px]">
+                                                        <span className="text-gray-600">闔蓋曲線大於 0g 時角度</span>
+                                                        <span className="font-bold text-green-700 font-mono">{stat.zeroCrossAngle}°</span>
+                                                    </div>
+                                                </div>
+
+                                                {/* 抗加速度計算結果 */}
+                                                <div className="bg-yellow-50 p-3 rounded mb-3 border border-yellow-100 space-y-2">
+                                                    <div className="flex justify-between items-center text-[15px]">
+                                                        <span className="text-gray-700">LCD 開 130˚ (g)</span>
+                                                        <span className="font-bold text-gray-800 font-mono">{stat.forceAt130}</span>
+                                                    </div>
+                                                    <div className="flex justify-between items-center text-[15px]">
+                                                        <span className="text-gray-700 font-bold">LCD 開 130˚ 抗加速度</span>
+                                                        <span className="font-bold text-red-600 font-mono">{stat.antiAcceleration}</span>
+                                                    </div>
+                                                </div>
+
+                                                {/* 指定角度荷重表 */}
+                                                <div className="border-t border-gray-100 pt-3">
+                                                    <h4 className="text-sm font-bold text-gray-700 mb-2 flex items-center bg-gray-50 p-1 rounded">
+                                                        <IconTable className="w-4 h-4 mr-1"/> 指定角度荷重 (g)
+                                                    </h4>
+                                                    <div className="overflow-x-auto rounded border border-gray-200">
+                                                        <table className="min-w-full text-xs text-center divide-y divide-gray-200">
+                                                            <thead className="bg-gray-100">
+                                                                <tr>
+                                                                    <th className="py-2 px-1 font-semibold text-gray-600">角度</th>
+                                                                    <th className="py-2 px-1 font-semibold text-gray-600">去程</th>
+                                                                    <th className="py-2 px-1 font-semibold text-gray-600">回程</th>
+                                                                </tr>
+                                                            </thead>
+                                                            <tbody className="divide-y divide-gray-100 bg-white">
+                                                                {stat.angleSteps.map((step, sIdx) => (
+                                                                    <tr key={sIdx} className="hover:bg-gray-50 transition-colors">
+                                                                        <td className="py-1 px-1 font-bold text-gray-700 bg-gray-50/50">{step.angle}°</td>
+                                                                        <td className="py-1 px-1 text-blue-600 font-mono">{step.goForce}</td>
+                                                                        <td className="py-1 px-1 text-red-600 font-mono">{step.retForce}</td>
+                                                                    </tr>
+                                                                ))}
+                                                            </tbody>
+                                                        </table>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                    {/* 總筆數顯示於分析結果最下方 */}
+                                    <div className="px-4 py-2 bg-gray-50 border-t border-gray-100 text-xs text-gray-500 text-right">
+                                        總筆數: {processedData.length}
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+
+                        {/* 3. 右側 (4等份): 分析圖表 */}
+                        <div className="w-full md:flex-[4] min-w-[300px]">
+                            <h2 className="text-lg font-bold text-gray-800 mb-3 flex items-center gap-2">
+                                <IconGrid /> 分析圖表 (自動生成)
+                            </h2>
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                <SingleChart 
+                                    title="1. 總覽 (Overview)" 
+                                    datasets={chartData.overview} 
+                                    xMin={chartRanges.overview.min} 
+                                    xMax={chartRanges.overview.max} 
+                                    onRangeChange={(type, val) => handleRangeChange('overview', type, val)}
+                                />
+                                <SingleChart 
+                                    title="2. LCD 夾持力 (去程 0-10°)" 
+                                    datasets={chartData.clamping} 
+                                    xMin={chartRanges.clamping.min}
+                                    xMax={chartRanges.clamping.max}
+                                    onRangeChange={(type, val) => handleRangeChange('clamping', type, val)}
+                                />
+                                <SingleChart 
+                                    title="3. 開啟力 (Opening 0-30°)" 
+                                    datasets={chartData.opening30} 
+                                    xMin={chartRanges.opening.min}
+                                    xMax={chartRanges.opening.max}
+                                    onRangeChange={(type, val) => handleRangeChange('opening', type, val)}
+                                />
+                                <SingleChart 
+                                    title="4. 闔蓋曲線 (Closing 0-30°)" 
+                                    datasets={chartData.closing30} 
+                                    xMin={chartRanges.closing.min}
+                                    xMax={chartRanges.closing.max}
+                                    onRangeChange={(type, val) => handleRangeChange('closing', type, val)}
+                                />
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* 底部：數值計算機報表 (Formatted Table - 恢復完整 4 欄, 僅 Curve 5) */}
+                    {reportTable.rows.length > 0 && (
+                        <div className="mt-8 bg-white rounded-xl shadow-md border border-gray-200 overflow-hidden">
+                            <div className="px-6 py-4 border-b border-gray-200 bg-gray-50 flex justify-between items-center">
+                                <h3 className="text-lg font-bold text-gray-800 flex items-center gap-2">
+                                    <IconTable />
+                                    數值計算機報表 (Calculator Report)
+                                </h3>
+                                <span className="text-xs text-gray-500 bg-white px-2 py-1 border rounded">
+                                    黃色區域為輸入數據 (來自檔案 A - 僅 Curve 5)
+                                </span>
+                            </div>
+                            <div className="table-container">
+                                <table className="min-w-full border-collapse">
+                                    <thead className="bg-excel-header">
+                                        {/* 第一層標題 (已移除紅色標題) */}
+                                        
+                                        {/* 第二層標題：Plot Name (ColSpan 4) */}
+                                        <tr>
+                                            {reportTable.plotNames.map((name, i) => (
+                                                <th key={`h2-${i}`} colSpan={4} className="px-4 py-2 text-center text-sm font-bold text-gray-800 border border-gray-300">
+                                                    {name}
+                                                </th>
+                                            ))}
+                                        </tr>
+                                        {/* 第三層標題：欄位名稱 */}
+                                        <tr>
+                                            {reportTable.headers.map((h, i) => {
+                                                const isLastInGroup = (i + 1) % 4 === 0; // 每4個一組
+                                                return (
+                                                    <th key={i} className={`px-4 py-2 text-center text-xs font-bold text-gray-700 border-b border-gray-300 border-r border-gray-300 ${isLastInGroup ? 'border-right-bold' : ''}`}>
+                                                        {h}
+                                                    </th>
+                                                );
+                                            })}
+                                        </tr>
+                                    </thead>
+                                    <tbody className="font-mono text-sm">
+                                        {/* 數據區 (黃色背景) */}
+                                        {reportTable.rows.map((row, rIdx) => (
+                                            <tr key={rIdx} className="bg-excel-yellow hover:brightness-95 transition-all">
+                                                {row.map((cell, cIdx) => {
+                                                    const isLastInGroup = (cIdx + 1) % 4 === 0; // 每4個一組
+                                                    return (
+                                                        <td key={cIdx} className={`px-4 py-1 whitespace-nowrap text-gray-800 border-b border-gray-300 border-r border-gray-300 ${isLastInGroup ? 'border-right-bold' : ''}`}>
+                                                            {cell}
+                                                        </td>
+                                                    );
+                                                })}
+                                            </tr>
+                                        ))}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
